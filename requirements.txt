@@ -1,0 +1,2 @@
+Pillow
+todoist-api-python
