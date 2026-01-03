@@ -8,6 +8,9 @@ from PIL import Image, ImageDraw, ImageFont
 import calendar
 from datetime import datetime
 
+import sys
+import argparse
+
 
 # ---------- Config ----------
 # If you already have display working, you can set these to your panel size.
@@ -260,7 +263,23 @@ def render_mock(recurring: list[TaskRow], upcoming: list[TaskRow]):
 
     return img
 
+def display_on_epd(img: Image.Image):
+    # Point to your Waveshare Python lib (adjust if your path differs)
+    sys.path.append("/home/eric/projects/e-Paper/RaspberryPi_JetsonNano/python/lib")
+    from waveshare_epd import epd7in5_V2
+
+    epd = epd7in5_V2.EPD()
+    epd.init()
+    epd.display(epd.getbuffer(img))
+    epd.sleep()
+
+
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--display", action="store_true", help="Render to Waveshare e-ink display")
+    ap.add_argument("--png", type=str, default="layout_mock.png", help="Output PNG filename")
+    args = ap.parse_args()
+
     today = date.today()
 
     recurring = [
@@ -279,9 +298,15 @@ def main():
 
     img = render_mock(recurring, upcoming)
 
-    # Save PNG for quick iteration
-    img.save("layout_mock.png")
-    print("Wrote layout_mock.png")
+    # Save PNG (nice for iteration)
+    img.save(args.png)
+    print(f"Wrote {args.png}")
+
+    # Display if requested
+    if args.display:
+        display_on_epd(img)
+        print("Displayed on e-ink.")
+
 
 if __name__ == "__main__":
     main()
