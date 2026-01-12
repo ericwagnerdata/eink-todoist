@@ -34,12 +34,14 @@ import argparse
 import calendar
 import os
 import sys
+import requests
 from dataclasses import dataclass
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import List, Optional, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
 from dotenv import load_dotenv
+
 
 
 # ----------------------------
@@ -75,6 +77,33 @@ ROW_H = 30
 
 INFO_PAD_LEFT = 14
 BODY_LINE_HEIGHT = 28
+
+WMO_WEATHER = {
+    0: "Clear",
+    1: "Mostly clear",
+    2: "Partly cloudy",
+    3: "Cloudy",
+    45: "Fog",
+    48: "Rime fog",
+    51: "Drizzle",
+    53: "Drizzle",
+    55: "Drizzle",
+    61: "Rain",
+    63: "Rain",
+    65: "Heavy rain",
+    71: "Snow",
+    73: "Snow",
+    75: "Heavy snow",
+    77: "Snow grains",
+    80: "Showers",
+    81: "Showers",
+    82: "Heavy showers",
+    85: "Snow showers",
+    86: "Heavy snow showers",
+    95: "Thunderstorm",
+    96: "T-storm hail",
+    99: "T-storm hail",
+}
 
 
 # ----------------------------
@@ -396,6 +425,56 @@ def fetch_todoist_rows(recurring_project_id: str) -> Tuple[List[Row], List[Row]]
     todo_rows.sort(key=lambda r: (r.due or date.max, r.title.lower()))
     return recurring_rows, todo_rows
 
+def fetch_weather_lines() -> tuple[str, str]:
+    """
+    Returns (line1, line2) for the INFO column.
+    Uses Open-Meteo: no key required.
+    Falls back to placeholder on any error.
+    """
+    try:
+        lat = float(os.getenv("WEATHER_LAT", "").strip())
+        lon = float(os.getenv("WEATHER_LON", "").strip())
+    except Exception:
+        return ("42°F  Snow", "↑ 47°   ↓ 31°")  # fallback
+
+    tz = os.getenv("WEATHER_TZ", "auto").strip() or "auto"
+
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "current": "temperature_2m,weather_code",
+        "daily": "temperature_2m_max,temperature_2m_min",
+        "temperature_unit": "fahrenheit",
+        "timezone": tz if tz != "auto" else "auto",
+    }
+
+    try:
+        r = requests.get(url, params=params, timeout=8)
+        r.raise_for_status()
+        data = r.json()
+
+        cur = data.get("current", {})
+        temp = cur.get("temperature_2m")
+        code = cur.get("weather_code")
+        cond = WMO_WEATHER.get(code, "Weather")
+
+        daily = data.get("daily", {})
+        hi = (daily.get("temperature_2m_max") or [None])[0]
+        lo = (daily.get("temperature_2m_min") or [None])[0]
+
+        # Build display lines (keep calm + short)
+        line1 = f"{round(temp)}°F  {cond}" if temp is not None else f"--°F  {cond}"
+        if hi is not None and lo is not None:
+            line2 = f"↑ {round(hi)}°   ↓ {round(lo)}°"
+        else:
+            line2 = "↑ --°   ↓ --°"
+
+        return (line1, line2)
+
+    except Exception:
+        return ("42°F  Snow", "↑ 47°   ↓ 31°")  # fallback
+
 
 # ----------------------------
 # Render
@@ -429,9 +508,10 @@ def render_dashboard(recurring: List[Row], todos: List[Row]) -> Image.Image:
     iy = LIST_START_Y
 
     # Weather placeholder (wire later)
-    draw.text((ix, iy), "42°F  Snow", font=FONT_BODY, fill=0)
+    weather_line1, weather_line2 = fetch_weather_lines()
+    draw.text((ix, iy), weather_line1, font=FONT_BODY, fill=0)
     iy += BODY_LINE_HEIGHT
-    draw.text((ix, iy), "↑ 47°   ↓ 31°", font=FONT_BODY, fill=0)
+    draw.text((ix, iy), weather_line2, font=FONT_BODY, fill=0)
     iy += BODY_LINE_HEIGHT * 2
 
     # Calendar
@@ -439,8 +519,20 @@ def render_dashboard(recurring: List[Row], todos: List[Row]) -> Image.Image:
     iy += 18
 
     # System status
-    updated = now
-    next_dt = updated  # placeholder until scheduler exists
+    updated = now.replace(second=0, microsecond=0)
+    minute = updated.minute
+    next_minute = 30 if minute < 30 else 0
+
+    if minute < 30:
+        next_dt = updated.replace(minute=30)
+    else:
+        next_dt = updated.replace(minute=0) + timedelta(hours=1)
+
+    # Quiet hours handling
+    if updated.hour >= 22 or updated.hour < 8:
+        next_dt = updated.replace(hour=8, minute=0)
+    elif next_dt.hour >= 22:
+        next_dt = updated.replace(hour=8, minute=0) + timedelta(days=1)
 
     draw.text((ix, iy), "Updated:", font=FONT_SMALL, fill=0)
     iy += 16
