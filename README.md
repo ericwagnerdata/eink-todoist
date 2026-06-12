@@ -32,11 +32,11 @@ This repo is the code half of that project — a portfolio piece more than a pro
 
 The layout has three columns: RECURRING, TO-DOS, and INFO (weather, calendar, status).
 
-Only tasks with due dates appear. The RECURRING column shows dated tasks from a dedicated Recurring Todoist project. The TO-DOS column shows all other dated, non-recurring tasks, sorted by date.
+Only tasks with due dates appear. The RECURRING column shows dated tasks from a dedicated Recurring Todoist project, limited to overdue tasks and ones due within the next week. The TO-DOS column shows all other dated, non-recurring tasks, sorted by date.
 
 My Todoist triage tool assigns dates by priority: P1 lands today, P2 lands this week, P3 gets no date and never appears on the display.
 
-Each column shows at most 10 rows. If there are more, a "+N more" line appears below the last row.
+Long task names wrap to a second line instead of being cut off. Each column fits as many rows as the panel height allows. If there are more, a "+N more" line appears below the last row.
 
 ## Setup
 
