@@ -1,4 +1,4 @@
-Pillow
-todoist-api-python
-
-python-dotenv
+Pillow>=10,<13
+requests>=2.31,<3
+python-dotenv>=1,<2
+todoist-api-python>=4,<5

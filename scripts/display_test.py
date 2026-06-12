@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
+# One-off hardware smoke test for the Waveshare 7.5" V2 display.
+# Not part of the dashboard pipeline — run manually on the Pi to confirm the panel responds.
+import os
+import sys
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 
-# Waveshare library path (from their repo)
-import sys
-sys.path.append("/home/eric/projects/e-Paper/RaspberryPi_JetsonNano/python/lib")
+lib_path = os.getenv(
+    "WAVESHARE_LIB_PATH",
+    "/home/eric/projects/e-Paper/RaspberryPi_JetsonNano/python/lib",
+)
+sys.path.append(lib_path)
 
 from waveshare_epd import epd7in5_V2
 

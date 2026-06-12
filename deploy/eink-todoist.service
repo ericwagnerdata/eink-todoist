@@ -1,0 +1,10 @@
+[Unit]
+Description=E-Ink Todoist Dashboard (oneshot render + push)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/eric/projects/eink-todoist
+ExecStart=/usr/bin/python3 scripts/dashboard.py --display
+Environment=PYTHONUNBUFFERED=1

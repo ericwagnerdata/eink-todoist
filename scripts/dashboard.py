@@ -10,6 +10,7 @@ Modes:
 - --display    : push to Waveshare 7.5" V2 e-paper (SPI)
 - --both       : do both PNG + display
 - --out PATH   : output PNG path (default: out/dashboard.png)
+- --force      : force display push even if content is unchanged
 
 Todoist config (recommended, stable):
 - Set RECURRING_PROJECT_ID in .env to avoid name lookup issues.
@@ -25,13 +26,16 @@ Design (v1):
 - overdue dates use inverted pill
 - no bullets/checkboxes/times
 - calm month calendar: no dots; today highlighted
-- Updated/Next show full date + 12h time AM/PM
+- Updated shows full date + 12h time AM/PM
+- Stale notice shown in INFO column when running from cached data
 """
 
 from __future__ import annotations
 
 import argparse
 import calendar
+import hashlib
+import json
 import os
 import sys
 import requests
@@ -64,18 +68,21 @@ COL3_X1 = W - PAD_X
 
 DIVIDER_W = 3
 
-DATE_PAD_RIGHT = 16
-COL1_DATE_X = COL1_X1 - DATE_PAD_RIGHT
-COL2_DATE_X = COL2_X1 - DATE_PAD_RIGHT
+GUTTER = 16  # space between a divider and the text on either side
+COL1_TEXT_X = COL1_X0
+COL1_DATE_X = COL1_X1 - GUTTER
+COL2_TEXT_X = COL2_X0 + GUTTER
+COL2_DATE_X = COL2_X1 - GUTTER
+TITLE_DATE_GAP = 14  # minimum space between a title and its date label
 
 HEADER_Y = PAD_Y
 HEADER_H = 34
 HEADER_LINE_Y_OFFSET = 28
 
-LIST_START_Y = HEADER_Y + HEADER_H + 8
-ROW_H = 30
+LIST_START_Y = HEADER_Y + HEADER_H + 10
+ROW_H = 32
 
-INFO_PAD_LEFT = 14
+INFO_PAD_LEFT = 16
 BODY_LINE_HEIGHT = 28
 
 WMO_WEATHER = {
@@ -118,48 +125,29 @@ def _load_font(preferred: List[str], size: int) -> ImageFont.FreeTypeFont | Imag
     return ImageFont.load_default()
 
 
-FONT_HEADER = _load_font(
-    [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-    ],
-    22,
-)
-FONT_BODY = _load_font(
-    [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    ],
-    20,
-)
-FONT_DATE = _load_font(
-    [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    ],
-    18,
-)
-FONT_SMALL = _load_font(
-    [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    ],
-    14,
-)
-FONT_SMALL_BOLD = _load_font(
-    [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-    ],
-    14,
-)
-FONT_MONO = _load_font(
-    [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
-    ],
-    14,
-)
+# Pi paths first; Windows paths let `--mock --png` previews render with real fonts on a PC.
+_SANS_BOLD = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "C:/Windows/Fonts/arialbd.ttf",
+]
+_SANS = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+]
+_MONO = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+    "C:/Windows/Fonts/consola.ttf",
+]
+
+FONT_HEADER = _load_font(_SANS_BOLD, 22)
+FONT_BODY = _load_font(_SANS, 20)
+FONT_DATE = _load_font(_SANS, 18)
+FONT_SMALL = _load_font(_SANS, 14)
+FONT_SMALL_BOLD = _load_font(_SANS_BOLD, 14)
+FONT_MONO = _load_font(_MONO, 14)
 
 
 # ----------------------------
@@ -200,6 +188,95 @@ def _flatten_results(results) -> list:
     return flat
 
 
+# ----------------------------
+# State: cache + skip-if-unchanged
+# ----------------------------
+def _state_dir() -> str:
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    return os.path.join(repo_root, "state")
+
+
+def save_fetch_cache(recurring: List[Row], todos: List[Row]) -> None:
+    state_dir = _state_dir()
+    os.makedirs(state_dir, exist_ok=True)
+    payload = {
+        "fetched_at": datetime.now().isoformat(),
+        "recurring": [
+            {"title": r.title, "due": r.due.isoformat() if r.due else None}
+            for r in recurring
+        ],
+        "todos": [
+            {"title": r.title, "due": r.due.isoformat() if r.due else None}
+            for r in todos
+        ],
+    }
+    with open(os.path.join(state_dir, "last_fetch.json"), "w") as f:
+        json.dump(payload, f, indent=2)
+
+
+def load_fetch_cache() -> Tuple[List[Row], List[Row], datetime]:
+    """Load cached rows and the fetch timestamp. Raises if cache missing or corrupt."""
+    cache_path = os.path.join(_state_dir(), "last_fetch.json")
+    with open(cache_path) as f:
+        data = json.load(f)
+    fetched_at = datetime.fromisoformat(data["fetched_at"])
+    today_d = date.today()
+
+    def _rows(items):
+        rows = []
+        for item in items:
+            d = date.fromisoformat(item["due"]) if item.get("due") else None
+            rows.append(Row(
+                title=item["title"],
+                due=d,
+                overdue=(d < today_d) if d else False,
+            ))
+        return rows
+
+    recurring = _rows(data.get("recurring", []))
+    todos = _rows(data.get("todos", []))
+    return recurring, todos, fetched_at
+
+
+def compute_content_signature(
+    recurring: List[Row],
+    todos: List[Row],
+    weather_lines: Tuple[str, str],
+    stale: bool,
+) -> str:
+    payload = {
+        "date": date.today().isoformat(),
+        "stale": stale,
+        "weather": list(weather_lines),
+        "recurring": [
+            {"title": r.title, "due": r.due.isoformat() if r.due else None, "overdue": r.overdue}
+            for r in recurring
+        ],
+        "todos": [
+            {"title": r.title, "due": r.due.isoformat() if r.due else None, "overdue": r.overdue}
+            for r in todos
+        ],
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def load_last_push() -> Optional[str]:
+    """Return the stored content signature from the last push, or None."""
+    push_path = os.path.join(_state_dir(), "last_push.json")
+    try:
+        with open(push_path) as f:
+            return json.load(f).get("signature")
+    except Exception:
+        return None
+
+
+def save_last_push(signature: str) -> None:
+    state_dir = _state_dir()
+    os.makedirs(state_dir, exist_ok=True)
+    with open(os.path.join(state_dir, "last_push.json"), "w") as f:
+        json.dump({"signature": signature, "pushed_at": datetime.now().isoformat()}, f, indent=2)
+
 
 # ----------------------------
 # Formatting / drawing
@@ -211,6 +288,11 @@ def fmt_due(d: date) -> str:
 def fmt_ts(dt: datetime) -> str:
     mon = dt.strftime("%b")
     return f"{mon} {dt.day}, {dt.year} {dt.strftime('%I:%M %p').lstrip('0')}"
+
+
+def fmt_ts_short(dt: datetime) -> str:
+    """Short timestamp for stale notice: 'Jun 11 8:55 AM'"""
+    return f"{dt.strftime('%b')} {dt.day} {dt.strftime('%I:%M %p').lstrip('0')}"
 
 
 def parse_due_to_date(due_str: str) -> Optional[date]:
@@ -251,9 +333,8 @@ def ellipsize_to_width(draw: ImageDraw.ImageDraw, s: str, font: ImageFont.ImageF
 
 def draw_header(draw: ImageDraw.ImageDraw, x0: int, x1: int, label: str) -> None:
     draw.text((x0, HEADER_Y), label.upper(), font=FONT_HEADER, fill=0)
-    underline_end = min(x0 + 190, x1 - 10)
     draw.line(
-        (x0, HEADER_Y + HEADER_LINE_Y_OFFSET, underline_end, HEADER_Y + HEADER_LINE_Y_OFFSET),
+        (x0, HEADER_Y + HEADER_LINE_Y_OFFSET, x1 - GUTTER, HEADER_Y + HEADER_LINE_Y_OFFSET),
         fill=0,
         width=2,
     )
@@ -287,12 +368,18 @@ def draw_right_aligned_date(draw: ImageDraw.ImageDraw, right_x: int, y: int, lab
     draw.text((right_x - w, y), label, font=FONT_DATE, fill=0)
 
 
-def draw_task_row(draw: ImageDraw.ImageDraw, x_text: int, x_date_right: int, y: int, row: Row) -> None:
+def draw_task_row(
+    draw: ImageDraw.ImageDraw, x_text: int, x_date_right: int, y: int, row: Row, today_d: date
+) -> None:
     if not row.due:
         return
-    due_label = fmt_due(row.due)
+    due_label = "Today" if row.due == today_d else fmt_due(row.due)
 
-    max_title_w = max(10, (x_date_right - 12) - x_text)
+    # Reserve the date label's actual footprint (pills are wider) so titles never overlap it.
+    date_w = text_w(draw, due_label, FONT_DATE)
+    if row.overdue:
+        date_w += 14  # pill horizontal padding
+    max_title_w = max(10, x_date_right - date_w - TITLE_DATE_GAP - x_text)
     title = ellipsize_to_width(draw, row.title, FONT_BODY, max_title_w)
 
     draw.text((x_text, y), title, font=FONT_BODY, fill=0)
@@ -300,6 +387,12 @@ def draw_task_row(draw: ImageDraw.ImageDraw, x_text: int, x_date_right: int, y: 
         draw_overdue_pill(draw, x_date_right, y + 1, due_label)
     else:
         draw_right_aligned_date(draw, x_date_right, y + 3, due_label)
+
+
+def draw_overflow_indicator(
+    draw: ImageDraw.ImageDraw, x_text: int, y: int, extra_count: int
+) -> None:
+    draw.text((x_text, y), f"+{extra_count} more", font=FONT_SMALL, fill=0)
 
 
 def draw_month_calendar(draw: ImageDraw.ImageDraw, x: int, y: int, year: int, month: int, today_d: date) -> int:
@@ -342,14 +435,14 @@ def draw_month_calendar(draw: ImageDraw.ImageDraw, x: int, y: int, year: int, mo
 def get_mock_rows() -> Tuple[List[Row], List[Row]]:
     t = date.today()
     recurring = [
-        Row("Take out trash", t.replace(day=max(1, min(28, t.day - 1))), overdue=True),
+        Row("Take out trash and recycling bins", t.replace(day=max(1, min(28, t.day - 1))), overdue=True),
         Row("Water plants", t.replace(day=min(28, t.day + 2)), overdue=False),
-        Row("Replace filter", t.replace(day=min(28, t.day + 7)), overdue=False),
-        Row("Pay credit card", t.replace(day=min(28, t.day + 12)), overdue=False),
+        Row("Replace furnace air filter (20x25x1)", t.replace(day=min(28, t.day + 7)), overdue=False),
+        Row("Pay credit card statement balance", t.replace(day=min(28, t.day + 12)), overdue=False),
     ]
     todos = [
-        Row("Ship Etsy orders", t.replace(day=min(28, t.day + 1)), overdue=False),
-        Row("Warranty email", t.replace(day=min(28, t.day + 2)), overdue=False),
+        Row("Ship Etsy orders before pickup window", t, overdue=False),
+        Row("Reply to warranty email from Bambu", t.replace(day=min(28, t.day + 2)), overdue=False),
         Row("Filament order", t.replace(day=min(28, t.day + 4)), overdue=False),
         Row("Fidelity bill", t.replace(day=min(28, t.day + 6)), overdue=False),
     ]
@@ -425,7 +518,8 @@ def fetch_todoist_rows(recurring_project_id: str) -> Tuple[List[Row], List[Row]]
     todo_rows.sort(key=lambda r: (r.due or date.max, r.title.lower()))
     return recurring_rows, todo_rows
 
-def fetch_weather_lines() -> tuple[str, str]:
+
+def fetch_weather_lines() -> Tuple[str, str]:
     """
     Returns (line1, line2) for the INFO column.
     Uses Open-Meteo: no key required.
@@ -435,7 +529,7 @@ def fetch_weather_lines() -> tuple[str, str]:
         lat = float(os.getenv("WEATHER_LAT", "").strip())
         lon = float(os.getenv("WEATHER_LON", "").strip())
     except Exception:
-        return ("42°F  Snow", "↑ 47°   ↓ 31°")  # fallback
+        return ("--°F  Weather n/a", "↑ --°   ↓ --°")  # honest fallback, never fake data
 
     tz = os.getenv("WEATHER_TZ", "auto").strip() or "auto"
 
@@ -473,13 +567,18 @@ def fetch_weather_lines() -> tuple[str, str]:
         return (line1, line2)
 
     except Exception:
-        return ("42°F  Snow", "↑ 47°   ↓ 31°")  # fallback
+        return ("--°F  Weather n/a", "↑ --°   ↓ --°")  # honest fallback, never fake data
 
 
 # ----------------------------
 # Render
 # ----------------------------
-def render_dashboard(recurring: List[Row], todos: List[Row]) -> Image.Image:
+def render_dashboard(
+    recurring: List[Row],
+    todos: List[Row],
+    weather_lines: Tuple[str, str],
+    stale_since: Optional[datetime] = None,
+) -> Image.Image:
     img = Image.new("L", (W, H), 255)
     draw = ImageDraw.Draw(img)
 
@@ -487,28 +586,35 @@ def render_dashboard(recurring: List[Row], todos: List[Row]) -> Image.Image:
     today_d = now.date()
 
     draw_dividers(draw)
-    draw_header(draw, COL1_X0, COL1_X1, "Recurring")
-    draw_header(draw, COL2_X0 + 10, COL2_X1, "To-Dos")
-    draw_header(draw, COL3_X0 + INFO_PAD_LEFT, COL3_X1, "Info")
+    draw_header(draw, COL1_TEXT_X, COL1_X1, "Recurring")
+    draw_header(draw, COL2_TEXT_X, COL2_X1, "To-Dos")
+    # Third column header doubles as the at-a-glance date, e.g. "WED · JUN 11"
+    today_label = f"{now.strftime('%a')} · {now.strftime('%b')} {now.day}"
+    draw_header(draw, COL3_X0 + INFO_PAD_LEFT, COL3_X1, today_label)
 
-    # Recurring list
+    # Recurring list (cap at 10, show overflow indicator if more)
     y = LIST_START_Y
-    for r in recurring[:10]:
-        draw_task_row(draw, COL1_X0, COL1_DATE_X, y, r)
+    visible_recurring = recurring[:10]
+    for r in visible_recurring:
+        draw_task_row(draw, COL1_TEXT_X, COL1_DATE_X, y, r, today_d)
         y += ROW_H
+    if len(recurring) > 10:
+        draw_overflow_indicator(draw, COL1_TEXT_X, y, len(recurring) - 10)
 
-    # Todos list
+    # Todos list (cap at 10, show overflow indicator if more)
     y = LIST_START_Y
-    for r in todos[:10]:
-        draw_task_row(draw, COL2_X0 + 10, COL2_DATE_X, y, r)
+    visible_todos = todos[:10]
+    for r in visible_todos:
+        draw_task_row(draw, COL2_TEXT_X, COL2_DATE_X, y, r, today_d)
         y += ROW_H
+    if len(todos) > 10:
+        draw_overflow_indicator(draw, COL2_TEXT_X, y, len(todos) - 10)
 
     # Info column
     ix = COL3_X0 + INFO_PAD_LEFT
     iy = LIST_START_Y
 
-    # Weather placeholder (wire later)
-    weather_line1, weather_line2 = fetch_weather_lines()
+    weather_line1, weather_line2 = weather_lines
     draw.text((ix, iy), weather_line1, font=FONT_BODY, fill=0)
     iy += BODY_LINE_HEIGHT
     draw.text((ix, iy), weather_line2, font=FONT_BODY, fill=0)
@@ -518,30 +624,50 @@ def render_dashboard(recurring: List[Row], todos: List[Row]) -> Image.Image:
     iy = draw_month_calendar(draw, ix, iy, now.year, now.month, today_d=today_d)
     iy += 18
 
-    # System status
+    # Updated footer (single line; no Next prediction)
     updated = now.replace(second=0, microsecond=0)
-    minute = updated.minute
-    next_minute = 30 if minute < 30 else 0
-
-    if minute < 30:
-        next_dt = updated.replace(minute=30)
-    else:
-        next_dt = updated.replace(minute=0) + timedelta(hours=1)
-
-    # Quiet hours handling
-    if updated.hour >= 22 or updated.hour < 8:
-        next_dt = updated.replace(hour=8, minute=0)
-    elif next_dt.hour >= 22:
-        next_dt = updated.replace(hour=8, minute=0) + timedelta(days=1)
-
     draw.text((ix, iy), "Updated:", font=FONT_SMALL, fill=0)
     iy += 16
     draw.text((ix, iy), fmt_ts(updated), font=FONT_SMALL, fill=0)
     iy += 26
 
-    draw.text((ix, iy), "Next:", font=FONT_SMALL, fill=0)
-    iy += 16
-    draw.text((ix, iy), fmt_ts(next_dt), font=FONT_SMALL, fill=0)
+    # Stale notice (inverted pill style)
+    if stale_since is not None:
+        stale_label = f"STALE · {fmt_ts_short(stale_since)}"
+        pad_x = 5
+        pad_y = 3
+        sw = text_w(draw, stale_label, FONT_SMALL_BOLD)
+        sbbox = draw.textbbox((0, 0), stale_label, font=FONT_SMALL_BOLD)
+        sh = int(sbbox[3] - sbbox[1])
+        draw.rounded_rectangle(
+            (ix - pad_x, iy - pad_y, ix + sw + pad_x, iy + sh + pad_y),
+            radius=4,
+            fill=0,
+        )
+        draw.text((ix, iy), stale_label, font=FONT_SMALL_BOLD, fill=255)
+
+    return img
+
+
+def render_error_frame(message: str) -> Image.Image:
+    """Minimal frame for when no data at all is available."""
+    img = Image.new("L", (W, H), 255)
+    draw = ImageDraw.Draw(img)
+
+    now = datetime.now()
+
+    draw_dividers(draw)
+    draw_header(draw, COL1_TEXT_X, COL1_X1, "Recurring")
+    draw_header(draw, COL2_TEXT_X, COL2_X1, "To-Dos")
+    today_label = f"{now.strftime('%a')} · {now.strftime('%b')} {now.day}"
+    draw_header(draw, COL3_X0 + INFO_PAD_LEFT, COL3_X1, today_label)
+
+    # Centered message in the task area, on a white box so dividers don't strike through
+    msg_w = text_w(draw, message, FONT_BODY)
+    msg_x = max(COL1_TEXT_X, (W - msg_w) // 2)
+    msg_y = LIST_START_Y + (H - LIST_START_Y) // 2 - 10
+    draw.rectangle((msg_x - 12, msg_y - 8, msg_x + msg_w + 12, msg_y + 30), fill=255)
+    draw.text((msg_x, msg_y), message, font=FONT_BODY, fill=0)
 
     return img
 
@@ -567,8 +693,19 @@ def to_epd_image(img: Image.Image) -> Image.Image:
 
 def push_to_waveshare(img: Image.Image) -> None:
     # Import locally so PNG-only runs don't require Waveshare libs installed
-    sys.path.append("/home/eric/projects/e-Paper/RaspberryPi_JetsonNano/python/lib")
-    from waveshare_epd import epd7in5_V2
+    lib_path = os.getenv(
+        "WAVESHARE_LIB_PATH",
+        "/home/eric/projects/e-Paper/RaspberryPi_JetsonNano/python/lib",
+    )
+    sys.path.append(lib_path)
+    try:
+        from waveshare_epd import epd7in5_V2
+    except ImportError as exc:
+        raise RuntimeError(
+            f"Could not import waveshare_epd from '{lib_path}'. "
+            f"Clone the Waveshare e-Paper repo and set WAVESHARE_LIB_PATH to its "
+            f"RaspberryPi_JetsonNano/python/lib directory."
+        ) from exc
 
     epd = epd7in5_V2.EPD()
     try:
@@ -591,6 +728,7 @@ def main() -> None:
     parser.add_argument("--display", action="store_true", help="Push to e-ink display")
     parser.add_argument("--both", action="store_true", help="Write PNG AND push to display")
     parser.add_argument("--out", default="out/dashboard.png", help="PNG output path")
+    parser.add_argument("--force", action="store_true", help="Force display push even if content unchanged")
     parser.add_argument(
         "--recurring-project-id",
         default="",
@@ -603,19 +741,62 @@ def main() -> None:
     if not do_png and not do_display:
         do_png = True
 
-    # ✅ Load .env BEFORE reading environment variables
+    # Load .env BEFORE reading environment variables
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     load_dotenv(dotenv_path=os.path.join(repo_root, ".env"), override=True)
 
     recurring_project_id = (args.recurring_project_id or "").strip() or os.getenv("RECURRING_PROJECT_ID", "").strip()
 
+    # Fetch weather first (needed for content signature)
+    weather_lines = fetch_weather_lines()
+
+    stale_since: Optional[datetime] = None
+
     if args.mock:
         recurring, todos = get_mock_rows()
     else:
-        # fetch_todoist_rows no longer needs to load dotenv, but it's okay if it still does
-        recurring, todos = fetch_todoist_rows(recurring_project_id=recurring_project_id)
+        try:
+            recurring, todos = fetch_todoist_rows(recurring_project_id=recurring_project_id)
+            save_fetch_cache(recurring, todos)
+        except Exception as exc:
+            print(f"Todoist fetch failed: {exc}", file=sys.stderr)
+            # Try the cache
+            try:
+                recurring, todos, stale_since = load_fetch_cache()
+                print(f"Using cached data from {stale_since.isoformat()}", file=sys.stderr)
+            except Exception:
+                # No cache available: render the error frame so the panel shows the
+                # outage instead of silently staying stale, then exit cleanly.
+                print("No cached data available. Rendering error frame.", file=sys.stderr)
+                img = render_error_frame("Todoist unavailable, no cached data")
+                if do_png:
+                    out_path = save_png(img, args.out)
+                    print(f"Wrote {out_path}")
+                if do_display:
+                    push_to_waveshare(to_epd_image(img))
+                    # Invalidate the stored signature so the next good fetch always
+                    # repaints over the error frame, even if the data didn't change.
+                    save_last_push("error-frame")
+                    print("Pushed error frame to Waveshare display")
+                sys.exit(0)
 
-    img = render_dashboard(recurring=recurring, todos=todos)
+    # Compute content signature (weather already fetched)
+    is_stale = stale_since is not None
+    signature = compute_content_signature(recurring, todos, weather_lines, is_stale)
+
+    # Skip only the panel push when content is unchanged (PNG output still happens)
+    if do_display and not args.force and load_last_push() == signature:
+        print("Content unchanged; skipped display refresh.")
+        do_display = False
+        if not do_png:
+            sys.exit(0)
+
+    img = render_dashboard(
+        recurring=recurring,
+        todos=todos,
+        weather_lines=weather_lines,
+        stale_since=stale_since,
+    )
 
     if do_png:
         out_path = save_png(img, args.out)
@@ -624,6 +805,7 @@ def main() -> None:
     if do_display:
         img1 = to_epd_image(img)
         push_to_waveshare(img1)
+        save_last_push(signature)
         print("Pushed to Waveshare display")
 
 
