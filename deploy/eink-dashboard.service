@@ -1,0 +1,13 @@
+[Unit]
+Description=E-Ink Todoist Dashboard Render
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=eric
+WorkingDirectory=/home/eric/projects/eink-todoist
+EnvironmentFile=/home/eric/projects/eink-todoist/.env
+ExecStart=/home/eric/projects/eink-todoist/.venv/bin/python /home/eric/projects/eink-todoist/scripts/dashboard.py --display --png --out /home/eric/projects/eink-todoist/out/dashboard.png
+StandardOutput=append:/var/log/eink-dashboard.log
+StandardError=append:/var/log/eink-dashboard.log
