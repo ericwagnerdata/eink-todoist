@@ -147,7 +147,8 @@ _MONO = [
 
 FONT_HEADER = _load_font(_SANS_BOLD, 22)
 FONT_BODY = _load_font(_SANS, 20)
-FONT_DATE = _load_font(_SANS, 18)
+FONT_BODY_BOLD = _load_font(_SANS_BOLD, 20)  # tasks due today
+FONT_DATE = _load_font(_SANS, 16)  # smaller than titles: content > metadata
 FONT_SMALL = _load_font(_SANS, 14)
 FONT_SMALL_BOLD = _load_font(_SANS_BOLD, 14)
 FONT_MONO = _load_font(_MONO, 14)
@@ -244,7 +245,7 @@ def load_fetch_cache() -> Tuple[List[Row], List[Row], datetime]:
 def compute_content_signature(
     recurring: List[Row],
     todos: List[Row],
-    weather_lines: Tuple[str, str],
+    weather_lines: List[str],
     stale: bool,
 ) -> str:
     payload = {
@@ -286,6 +287,18 @@ def save_last_push(signature: str) -> None:
 # ----------------------------
 def fmt_due(d: date) -> str:
     return d.strftime("%b") + " " + str(d.day)
+
+
+def fmt_due_label(d: date, today_d: date) -> str:
+    """Relative labels for near dates (no mental math), absolute beyond a week."""
+    delta = (d - today_d).days
+    if delta == 0:
+        return "Today"
+    if delta == 1:
+        return "Tmrw"
+    if 2 <= delta <= 6:
+        return d.strftime("%a")
+    return fmt_due(d)
 
 
 def fmt_ts(dt: datetime) -> str:
@@ -382,20 +395,23 @@ def draw_task_column(
             continue
         if y + ROW_H > LIST_BOTTOM:
             break
-        due_label = "Today" if row.due == today_d else fmt_due(row.due)
+        # Overdue keeps the absolute date in its pill; upcoming gets relative labels
+        due_label = fmt_due(row.due) if row.overdue else fmt_due_label(row.due, today_d)
+        is_today = (not row.overdue) and row.due == today_d
+        title_font = FONT_BODY_BOLD if is_today else FONT_BODY
 
         # Reserve the date label's actual footprint (pills are wider) so titles never overlap it.
         date_w = text_w(draw, due_label, FONT_DATE)
         if row.overdue:
             date_w += 14  # pill horizontal padding
         max_title_w = max(10, x_date_right - date_w - TITLE_DATE_GAP - x_text)
-        title = ellipsize_to_width(draw, row.title, FONT_BODY, max_title_w)
+        title = ellipsize_to_width(draw, row.title, title_font, max_title_w)
 
-        draw.text((x_text, y), title, font=FONT_BODY, fill=0)
+        draw.text((x_text, y), title, font=title_font, fill=0)
         if row.overdue:
             draw_overdue_pill(draw, x_date_right, y + 1, due_label)
         else:
-            draw_right_aligned_date(draw, x_date_right, y + 3, due_label)
+            draw_right_aligned_date(draw, x_date_right, y + 4, due_label)
 
         y += ROW_H
         shown += 1
@@ -464,9 +480,9 @@ def get_mock_rows() -> Tuple[List[Row], List[Row]]:
     ]
     todos = [
         Row("Ship Etsy orders before pickup window", t, overdue=False),
-        Row("Reply to warranty email from Bambu", t.replace(day=min(28, t.day + 2)), overdue=False),
+        Row("Reply to warranty email from Bambu", t.replace(day=min(28, t.day + 1)), overdue=False),
         Row("Filament order", t.replace(day=min(28, t.day + 4)), overdue=False),
-        Row("Fidelity bill", t.replace(day=min(28, t.day + 6)), overdue=False),
+        Row("Fidelity bill", t.replace(day=min(28, t.day + 9)), overdue=False),
     ]
     return recurring, todos
 
@@ -541,9 +557,9 @@ def fetch_todoist_rows(recurring_project_id: str) -> Tuple[List[Row], List[Row]]
     return recurring_rows, todo_rows
 
 
-def fetch_weather_lines() -> Tuple[str, str]:
+def fetch_weather_lines() -> List[str]:
     """
-    Returns (line1, line2) for the INFO column.
+    Returns the INFO column weather lines (2, plus a rain line when it matters).
     Uses Open-Meteo: no key required.
     Falls back to placeholder on any error.
     """
@@ -551,7 +567,7 @@ def fetch_weather_lines() -> Tuple[str, str]:
         lat = float(os.getenv("WEATHER_LAT", "").strip())
         lon = float(os.getenv("WEATHER_LON", "").strip())
     except Exception:
-        return ("--°F  Weather n/a", "↑ --°   ↓ --°")  # honest fallback, never fake data
+        return ["--°F  Weather n/a", "↑ --°   ↓ --°"]  # honest fallback, never fake data
 
     tz = os.getenv("WEATHER_TZ", "auto").strip() or "auto"
 
@@ -560,7 +576,7 @@ def fetch_weather_lines() -> Tuple[str, str]:
         "latitude": lat,
         "longitude": lon,
         "current": "temperature_2m,weather_code",
-        "daily": "temperature_2m_max,temperature_2m_min",
+        "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max",
         "temperature_unit": "fahrenheit",
         "timezone": tz if tz != "auto" else "auto",
     }
@@ -578,6 +594,7 @@ def fetch_weather_lines() -> Tuple[str, str]:
         daily = data.get("daily", {})
         hi = (daily.get("temperature_2m_max") or [None])[0]
         lo = (daily.get("temperature_2m_min") or [None])[0]
+        rain = (daily.get("precipitation_probability_max") or [None])[0]
 
         # Build display lines (keep calm + short)
         line1 = f"{round(temp)}°F  {cond}" if temp is not None else f"--°F  {cond}"
@@ -586,10 +603,13 @@ def fetch_weather_lines() -> Tuple[str, str]:
         else:
             line2 = "↑ --°   ↓ --°"
 
-        return (line1, line2)
+        lines = [line1, line2]
+        if rain is not None and rain >= 10:
+            lines.append(f"Rain {round(rain)}%")
+        return lines
 
     except Exception:
-        return ("--°F  Weather n/a", "↑ --°   ↓ --°")  # honest fallback, never fake data
+        return ["--°F  Weather n/a", "↑ --°   ↓ --°"]  # honest fallback, never fake data
 
 
 # ----------------------------
@@ -598,7 +618,7 @@ def fetch_weather_lines() -> Tuple[str, str]:
 def render_dashboard(
     recurring: List[Row],
     todos: List[Row],
-    weather_lines: Tuple[str, str],
+    weather_lines: List[str],
     stale_since: Optional[datetime] = None,
 ) -> Image.Image:
     img = Image.new("L", (W, H), 255)
@@ -621,11 +641,10 @@ def render_dashboard(
     ix = COL3_X0 + INFO_PAD_LEFT
     iy = LIST_START_Y
 
-    weather_line1, weather_line2 = weather_lines
-    draw.text((ix, iy), weather_line1, font=FONT_BODY, fill=0)
+    for line in weather_lines:
+        draw.text((ix, iy), line, font=FONT_BODY, fill=0)
+        iy += BODY_LINE_HEIGHT
     iy += BODY_LINE_HEIGHT
-    draw.text((ix, iy), weather_line2, font=FONT_BODY, fill=0)
-    iy += BODY_LINE_HEIGHT * 2
 
     # Calendar
     iy = draw_month_calendar(draw, ix, iy, now.year, now.month, today_d=today_d)
