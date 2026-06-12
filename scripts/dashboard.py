@@ -557,17 +557,43 @@ def fetch_todoist_rows(recurring_project_id: str) -> Tuple[List[Row], List[Row]]
     return recurring_rows, todo_rows
 
 
+WEATHER_FALLBACK = ["--°F  Weather n/a", "↑ --°   ↓ --°"]
+WEATHER_CACHE_MAX_AGE_H = 3  # reuse last good weather for up to 3 hours on fetch failure
+
+
+def _load_weather_cache() -> Optional[List[str]]:
+    try:
+        with open(os.path.join(_state_dir(), "last_weather.json")) as f:
+            data = json.load(f)
+        age = datetime.now() - datetime.fromisoformat(data["fetched_at"])
+        if age.total_seconds() <= WEATHER_CACHE_MAX_AGE_H * 3600:
+            return list(data["lines"])
+    except Exception:
+        pass
+    return None
+
+
+def _save_weather_cache(lines: List[str]) -> None:
+    try:
+        state_dir = _state_dir()
+        os.makedirs(state_dir, exist_ok=True)
+        with open(os.path.join(state_dir, "last_weather.json"), "w") as f:
+            json.dump({"fetched_at": datetime.now().isoformat(), "lines": lines}, f)
+    except Exception:
+        pass  # cache is best-effort; never let it break a render
+
+
 def fetch_weather_lines() -> List[str]:
     """
     Returns the INFO column weather lines (2, plus a rain line when it matters).
-    Uses Open-Meteo: no key required.
-    Falls back to placeholder on any error.
+    Uses Open-Meteo: no key required. Retries once (the Pi's wifi DNS is flaky),
+    then falls back to recent cached weather, then to an honest placeholder.
     """
     try:
         lat = float(os.getenv("WEATHER_LAT", "").strip())
         lon = float(os.getenv("WEATHER_LON", "").strip())
     except Exception:
-        return ["--°F  Weather n/a", "↑ --°   ↓ --°"]  # honest fallback, never fake data
+        return list(WEATHER_FALLBACK)  # honest fallback, never fake data
 
     tz = os.getenv("WEATHER_TZ", "auto").strip() or "auto"
 
@@ -581,11 +607,23 @@ def fetch_weather_lines() -> List[str]:
         "timezone": tz if tz != "auto" else "auto",
     }
 
-    try:
-        r = requests.get(url, params=params, timeout=8)
-        r.raise_for_status()
-        data = r.json()
+    data = None
+    for attempt in range(2):
+        try:
+            r = requests.get(url, params=params, timeout=8)
+            r.raise_for_status()
+            data = r.json()
+            break
+        except Exception:
+            if attempt == 0:
+                import time
+                time.sleep(2)
 
+    if data is None:
+        cached = _load_weather_cache()
+        return cached if cached is not None else list(WEATHER_FALLBACK)
+
+    try:
         cur = data.get("current", {})
         temp = cur.get("temperature_2m")
         code = cur.get("weather_code")
@@ -606,10 +644,12 @@ def fetch_weather_lines() -> List[str]:
         lines = [line1, line2]
         if rain is not None and rain >= 10:
             lines.append(f"Rain {round(rain)}%")
+        _save_weather_cache(lines)
         return lines
 
     except Exception:
-        return ["--°F  Weather n/a", "↑ --°   ↓ --°"]  # honest fallback, never fake data
+        cached = _load_weather_cache()
+        return cached if cached is not None else list(WEATHER_FALLBACK)
 
 
 # ----------------------------
