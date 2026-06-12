@@ -36,7 +36,7 @@ Only tasks with due dates appear. The RECURRING column shows dated tasks from a 
 
 My Todoist triage tool assigns dates by priority: P1 lands today, P2 lands this week, P3 gets no date and never appears on the display.
 
-Long task names wrap to a second line instead of being cut off. Each column fits as many rows as the panel height allows. If there are more, a "+N more" line appears below the last row.
+Each task is one line, with long names trimmed with an ellipsis. Each column fits as many rows as the panel height allows. If there are more, a "+N more" line appears below the last row.
 
 ## Setup
 

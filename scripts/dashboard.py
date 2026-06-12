@@ -53,10 +53,10 @@ from dotenv import load_dotenv
 # ----------------------------
 W, H = 800, 480
 
-PAD_X = 28
+PAD_X = 16
 PAD_Y = 20
 
-COL_W = 280  # Recurring + Todos equal width
+COL_W = 290  # Recurring + Todos equal width (info column gets the remainder, ~188px)
 COL1_X0 = PAD_X
 COL1_X1 = COL1_X0 + COL_W
 
@@ -68,12 +68,12 @@ COL3_X1 = W - PAD_X
 
 DIVIDER_W = 3
 
-GUTTER = 16  # space between a divider and the text on either side
+GUTTER = 12  # space between a divider and the text on either side
 COL1_TEXT_X = COL1_X0
 COL1_DATE_X = COL1_X1 - GUTTER
 COL2_TEXT_X = COL2_X0 + GUTTER
 COL2_DATE_X = COL2_X1 - GUTTER
-TITLE_DATE_GAP = 14  # minimum space between a title and its date label
+TITLE_DATE_GAP = 10  # minimum space between a title and its date label
 
 HEADER_Y = PAD_Y
 HEADER_H = 34
@@ -81,12 +81,11 @@ HEADER_LINE_Y_OFFSET = 28
 
 LIST_START_Y = HEADER_Y + HEADER_H + 10
 ROW_H = 32
-WRAP_LINE_H = 24  # extra height when a title wraps to a second line
 LIST_BOTTOM = H - PAD_Y - 18  # keep room for a "+N more" line
 
 RECURRING_WINDOW_DAYS = 7  # recurring column shows overdue + next week only
 
-INFO_PAD_LEFT = 16
+INFO_PAD_LEFT = 12
 BODY_LINE_HEIGHT = 28
 
 WMO_WEATHER = {
@@ -372,67 +371,33 @@ def draw_right_aligned_date(draw: ImageDraw.ImageDraw, right_x: int, y: int, lab
     draw.text((right_x - w, y), label, font=FONT_DATE, fill=0)
 
 
-def split_title_lines(
-    draw: ImageDraw.ImageDraw, s: str, first_max_w: int, second_max_w: int
-) -> Tuple[str, Optional[str]]:
-    """Fit a title onto one line, or wrap at a word break onto a second line.
-    The second line is ellipsized if the remainder still doesn't fit."""
-    if text_w(draw, s, FONT_BODY) <= first_max_w:
-        return s, None
-
-    words = s.split()
-    line1_words: List[str] = []
-    for i, word in enumerate(words):
-        cand = " ".join(line1_words + [word])
-        if line1_words and text_w(draw, cand, FONT_BODY) > first_max_w:
-            rest = " ".join(words[i:])
-            return " ".join(line1_words), ellipsize_to_width(draw, rest, FONT_BODY, second_max_w)
-        line1_words.append(word)
-
-    # Single overlong word (no break point): hard-ellipsize on one line
-    return ellipsize_to_width(draw, s, FONT_BODY, first_max_w), None
-
-
-def layout_task_row(
-    draw: ImageDraw.ImageDraw, x_text: int, x_date_right: int, row: Row, today_d: date
-) -> Tuple[str, str, Optional[str], int]:
-    """Compute (due_label, line1, line2, height) for a task row without drawing."""
-    due_label = "Today" if row.due == today_d else fmt_due(row.due)
-
-    # Reserve the date label's actual footprint (pills are wider) so titles never overlap it.
-    date_w = text_w(draw, due_label, FONT_DATE)
-    if row.overdue:
-        date_w += 14  # pill horizontal padding
-    first_max_w = max(10, x_date_right - date_w - TITLE_DATE_GAP - x_text)
-    second_max_w = max(10, x_date_right - x_text)  # second line runs under the date
-
-    line1, line2 = split_title_lines(draw, row.title, first_max_w, second_max_w)
-    height = ROW_H + (WRAP_LINE_H if line2 is not None else 0)
-    return due_label, line1, line2, height
-
-
 def draw_task_column(
     draw: ImageDraw.ImageDraw, x_text: int, x_date_right: int, rows: List[Row], today_d: date
 ) -> None:
-    """Draw rows top-down until the column is full, then a '+N more' line."""
+    """Draw single-line rows top-down until the column is full, then a '+N more' line."""
     y = LIST_START_Y
     shown = 0
     for row in rows:
         if not row.due:
             continue
-        due_label, line1, line2, height = layout_task_row(draw, x_text, x_date_right, row, today_d)
-        if y + height > LIST_BOTTOM:
+        if y + ROW_H > LIST_BOTTOM:
             break
+        due_label = "Today" if row.due == today_d else fmt_due(row.due)
 
-        draw.text((x_text, y), line1, font=FONT_BODY, fill=0)
+        # Reserve the date label's actual footprint (pills are wider) so titles never overlap it.
+        date_w = text_w(draw, due_label, FONT_DATE)
+        if row.overdue:
+            date_w += 14  # pill horizontal padding
+        max_title_w = max(10, x_date_right - date_w - TITLE_DATE_GAP - x_text)
+        title = ellipsize_to_width(draw, row.title, FONT_BODY, max_title_w)
+
+        draw.text((x_text, y), title, font=FONT_BODY, fill=0)
         if row.overdue:
             draw_overdue_pill(draw, x_date_right, y + 1, due_label)
         else:
             draw_right_aligned_date(draw, x_date_right, y + 3, due_label)
-        if line2 is not None:
-            draw.text((x_text, y + WRAP_LINE_H), line2, font=FONT_BODY, fill=0)
 
-        y += height
+        y += ROW_H
         shown += 1
 
     if shown < len(rows):
