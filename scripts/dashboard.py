@@ -485,18 +485,27 @@ def filter_recurring_window(rows: List[Row]) -> List[Row]:
 
 
 def get_mock_rows() -> Tuple[List[Row], List[Row]]:
+    """Generic demo data (also used for the README screenshot). Short titles,
+    one of every visual state: overdue pill, Today, Tmrw, weekday, absolute date."""
     t = date.today()
+
+    def day(offset: int) -> date:
+        return t + timedelta(days=offset)
+
     recurring = [
-        Row("Take out trash and recycling bins", t.replace(day=max(1, min(28, t.day - 1))), overdue=True),
-        Row("Water plants", t.replace(day=min(28, t.day + 2)), overdue=False),
-        Row("Replace furnace air filter (20x25x1)", t.replace(day=min(28, t.day + 7)), overdue=False),
-        Row("Pay credit card statement balance", t.replace(day=min(28, t.day + 12)), overdue=False),
+        Row("Water the plants", day(-1), overdue=True),
+        Row("Take out recycling", day(0), overdue=False),
+        Row("Clean coffee maker", day(2), overdue=False),
+        Row("Mow the lawn", day(4), overdue=False),
+        Row("Change HVAC filter", day(6), overdue=False),
     ]
     todos = [
-        Row("Ship Etsy orders before pickup window", t, overdue=False),
-        Row("Reply to warranty email from Bambu", t.replace(day=min(28, t.day + 1)), overdue=False),
-        Row("Filament order", t.replace(day=min(28, t.day + 4)), overdue=False),
-        Row("Fidelity bill", t.replace(day=min(28, t.day + 9)), overdue=False),
+        Row("Pick up dry cleaning", day(0), overdue=False),
+        Row("Call the dentist", day(1), overdue=False),
+        Row("Renew car registration", day(3), overdue=False),
+        Row("Submit expense report", day(5), overdue=False),
+        Row("Book flights for July", day(9), overdue=False),
+        Row("Get an oil change", day(13), overdue=False),
     ]
     return recurring, todos
 
