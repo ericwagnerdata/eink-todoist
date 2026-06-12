@@ -2,7 +2,7 @@
 
 A small, always-on e-ink dashboard that renders my Todoist tasks on a Waveshare 7.5" display driven by a Raspberry Pi Zero 2 W.
 
-![Dashboard preview](docs/images/dashboard.png)
+![Dashboard in its enclosure](docs/images/enclosure.png)
 
 ## Inspiration
 
@@ -29,6 +29,8 @@ This repo is the code half of that project — a portfolio piece more than a pro
 - Runs as a systemd timer on the Pi (see `deploy/` for the unit files and install steps)
 
 ## What shows up on the display
+
+![Dashboard layout](docs/images/dashboard.png)
 
 The layout has three columns: RECURRING, TO-DOS, and INFO (weather, calendar, status).
 
