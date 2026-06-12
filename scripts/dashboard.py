@@ -245,13 +245,13 @@ def load_fetch_cache() -> Tuple[List[Row], List[Row], datetime]:
 def compute_content_signature(
     recurring: List[Row],
     todos: List[Row],
-    weather_lines: List[str],
+    weather: dict,
     stale: bool,
 ) -> str:
     payload = {
         "date": date.today().isoformat(),
         "stale": stale,
-        "weather": list(weather_lines),
+        "weather": weather,
         "recurring": [
             {"title": r.title, "due": r.due.isoformat() if r.due else None, "overdue": r.overdue}
             for r in recurring
@@ -426,6 +426,20 @@ def draw_overflow_indicator(
     draw.text((x_text, y), f"+{extra_count} more", font=FONT_SMALL, fill=0)
 
 
+def draw_sun_icon(draw: ImageDraw.ImageDraw, x: int, y: int, rising: bool) -> int:
+    """Tiny half-sun-on-horizon icon with an up/down arrow. Returns width used."""
+    r = 5
+    cx = x + 8
+    horizon_y = y + 13
+    draw.pieslice((cx - r, horizon_y - r, cx + r, horizon_y + r), 180, 360, fill=0)
+    draw.line((x, horizon_y, x + 16, horizon_y), fill=0, width=1)
+    if rising:
+        draw.polygon([(cx - 3, y + 5), (cx + 3, y + 5), (cx, y + 1)], fill=0)
+    else:
+        draw.polygon([(cx - 3, y + 1), (cx + 3, y + 1), (cx, y + 5)], fill=0)
+    return 20
+
+
 def draw_month_calendar(draw: ImageDraw.ImageDraw, x: int, y: int, year: int, month: int, today_d: date) -> int:
     title = f"{calendar.month_name[month]} {year}".upper()
     draw.text((x, y), title, font=FONT_SMALL_BOLD, fill=0)
@@ -557,35 +571,42 @@ def fetch_todoist_rows(recurring_project_id: str) -> Tuple[List[Row], List[Row]]
     return recurring_rows, todo_rows
 
 
-WEATHER_FALLBACK = ["--°F  Weather n/a", "↑ --°   ↓ --°"]
+WEATHER_FALLBACK = {"lines": ["--°F  Weather n/a", "↑ --°   ↓ --°"], "sun": None}
 WEATHER_CACHE_MAX_AGE_H = 3  # reuse last good weather for up to 3 hours on fetch failure
 
 
-def _load_weather_cache() -> Optional[List[str]]:
+def _load_weather_cache() -> Optional[dict]:
     try:
         with open(os.path.join(_state_dir(), "last_weather.json")) as f:
             data = json.load(f)
         age = datetime.now() - datetime.fromisoformat(data["fetched_at"])
         if age.total_seconds() <= WEATHER_CACHE_MAX_AGE_H * 3600:
-            return list(data["lines"])
+            if "weather" in data:
+                return data["weather"]
+            return {"lines": list(data["lines"]), "sun": None}  # pre-sun cache format
     except Exception:
         pass
     return None
 
 
-def _save_weather_cache(lines: List[str]) -> None:
+def _save_weather_cache(weather: dict) -> None:
     try:
         state_dir = _state_dir()
         os.makedirs(state_dir, exist_ok=True)
         with open(os.path.join(state_dir, "last_weather.json"), "w") as f:
-            json.dump({"fetched_at": datetime.now().isoformat(), "lines": lines}, f)
+            json.dump({"fetched_at": datetime.now().isoformat(), "weather": weather}, f)
     except Exception:
         pass  # cache is best-effort; never let it break a render
 
 
-def fetch_weather_lines() -> List[str]:
+def _fmt_sun_time(iso_str: str) -> str:
+    dt = datetime.fromisoformat(iso_str)
+    return dt.strftime("%I:%M %p").lstrip("0")
+
+
+def fetch_weather() -> dict:
     """
-    Returns the INFO column weather lines (2, plus a rain line when it matters).
+    Returns {"lines": [...], "sun": ("6:32 AM", "8:27 PM") | None} for the INFO column.
     Uses Open-Meteo: no key required. Retries once (the Pi's wifi DNS is flaky),
     then falls back to recent cached weather, then to an honest placeholder.
     """
@@ -593,7 +614,7 @@ def fetch_weather_lines() -> List[str]:
         lat = float(os.getenv("WEATHER_LAT", "").strip())
         lon = float(os.getenv("WEATHER_LON", "").strip())
     except Exception:
-        return list(WEATHER_FALLBACK)  # honest fallback, never fake data
+        return dict(WEATHER_FALLBACK)  # honest fallback, never fake data
 
     tz = os.getenv("WEATHER_TZ", "auto").strip() or "auto"
 
@@ -602,7 +623,7 @@ def fetch_weather_lines() -> List[str]:
         "latitude": lat,
         "longitude": lon,
         "current": "temperature_2m,weather_code",
-        "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+        "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset",
         "temperature_unit": "fahrenheit",
         "timezone": tz if tz != "auto" else "auto",
     }
@@ -621,7 +642,7 @@ def fetch_weather_lines() -> List[str]:
 
     if data is None:
         cached = _load_weather_cache()
-        return cached if cached is not None else list(WEATHER_FALLBACK)
+        return cached if cached is not None else dict(WEATHER_FALLBACK)
 
     try:
         cur = data.get("current", {})
@@ -633,6 +654,8 @@ def fetch_weather_lines() -> List[str]:
         hi = (daily.get("temperature_2m_max") or [None])[0]
         lo = (daily.get("temperature_2m_min") or [None])[0]
         rain = (daily.get("precipitation_probability_max") or [None])[0]
+        sunrise = (daily.get("sunrise") or [None])[0]
+        sunset = (daily.get("sunset") or [None])[0]
 
         # Build display lines (keep calm + short)
         line1 = f"{round(temp)}°F  {cond}" if temp is not None else f"--°F  {cond}"
@@ -642,14 +665,20 @@ def fetch_weather_lines() -> List[str]:
             line2 = "↑ --°   ↓ --°"
 
         lines = [line1, line2]
-        if rain is not None and rain >= 10:
+        if rain is not None:
             lines.append(f"Rain {round(rain)}%")
-        _save_weather_cache(lines)
-        return lines
+
+        sun = None
+        if sunrise and sunset:
+            sun = (_fmt_sun_time(sunrise), _fmt_sun_time(sunset))
+
+        weather = {"lines": lines, "sun": sun}
+        _save_weather_cache(weather)
+        return weather
 
     except Exception:
         cached = _load_weather_cache()
-        return cached if cached is not None else list(WEATHER_FALLBACK)
+        return cached if cached is not None else dict(WEATHER_FALLBACK)
 
 
 # ----------------------------
@@ -658,7 +687,7 @@ def fetch_weather_lines() -> List[str]:
 def render_dashboard(
     recurring: List[Row],
     todos: List[Row],
-    weather_lines: List[str],
+    weather: dict,
     stale_since: Optional[datetime] = None,
 ) -> Image.Image:
     img = Image.new("L", (W, H), 255)
@@ -681,8 +710,18 @@ def render_dashboard(
     ix = COL3_X0 + INFO_PAD_LEFT
     iy = LIST_START_Y
 
-    for line in weather_lines:
+    for line in weather["lines"]:
         draw.text((ix, iy), line, font=FONT_BODY, fill=0)
+        iy += BODY_LINE_HEIGHT
+
+    sun = weather.get("sun")
+    if sun:
+        sx = ix
+        sx += draw_sun_icon(draw, sx, iy + 2, rising=True)
+        draw.text((sx, iy + 2), sun[0], font=FONT_DATE, fill=0)
+        sx += text_w(draw, sun[0], FONT_DATE) + 12
+        sx += draw_sun_icon(draw, sx, iy + 2, rising=False)
+        draw.text((sx, iy + 2), sun[1], font=FONT_DATE, fill=0)
         iy += BODY_LINE_HEIGHT
     iy += BODY_LINE_HEIGHT
 
@@ -814,7 +853,7 @@ def main() -> None:
     recurring_project_id = (args.recurring_project_id or "").strip() or os.getenv("RECURRING_PROJECT_ID", "").strip()
 
     # Fetch weather first (needed for content signature)
-    weather_lines = fetch_weather_lines()
+    weather = fetch_weather()
 
     stale_since: Optional[datetime] = None
 
@@ -851,7 +890,7 @@ def main() -> None:
 
     # Compute content signature (weather already fetched)
     is_stale = stale_since is not None
-    signature = compute_content_signature(recurring, todos, weather_lines, is_stale)
+    signature = compute_content_signature(recurring, todos, weather, is_stale)
 
     # Skip only the panel push when content is unchanged (PNG output still happens)
     if do_display and not args.force and load_last_push() == signature:
@@ -863,7 +902,7 @@ def main() -> None:
     img = render_dashboard(
         recurring=recurring,
         todos=todos,
-        weather_lines=weather_lines,
+        weather=weather,
         stale_since=stale_since,
     )
 
