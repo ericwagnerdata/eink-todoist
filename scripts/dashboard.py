@@ -81,9 +81,11 @@ HEADER_LINE_Y_OFFSET = 28
 
 LIST_START_Y = HEADER_Y + HEADER_H + 10
 ROW_H = 32
+WRAP_LINE_H = 24  # extra height when a to-do title wraps to a second line
 LIST_BOTTOM = H - PAD_Y - 18  # keep room for a "+N more" line
 
 RECURRING_WINDOW_DAYS = 7  # recurring column shows overdue + next week only
+TODOS_WINDOW_DAYS = 30  # to-dos column shows overdue + next 30 days only
 
 INFO_PAD_LEFT = 12
 BODY_LINE_HEIGHT = 28
@@ -347,6 +349,27 @@ def ellipsize_to_width(draw: ImageDraw.ImageDraw, s: str, font: ImageFont.ImageF
     return s[:cut] + "…"
 
 
+def split_title_lines(
+    draw: ImageDraw.ImageDraw, s: str, font: ImageFont.ImageFont, first_max_w: int, second_max_w: int
+) -> Tuple[str, Optional[str]]:
+    """Fit a title onto one line, or wrap at a word break onto a second line.
+    The second line is ellipsized if the remainder still doesn't fit."""
+    if text_w(draw, s, font) <= first_max_w:
+        return s, None
+
+    words = s.split()
+    line1_words: List[str] = []
+    for i, word in enumerate(words):
+        cand = " ".join(line1_words + [word])
+        if line1_words and text_w(draw, cand, font) > first_max_w:
+            rest = " ".join(words[i:])
+            return " ".join(line1_words), ellipsize_to_width(draw, rest, font, second_max_w)
+        line1_words.append(word)
+
+    # Single overlong word (no break point): hard-ellipsize on one line
+    return ellipsize_to_width(draw, s, font, first_max_w), None
+
+
 def draw_header(draw: ImageDraw.ImageDraw, x0: int, x1: int, label: str) -> None:
     draw.text((x0, HEADER_Y), label.upper(), font=FONT_HEADER, fill=0)
     draw.line(
@@ -385,16 +408,20 @@ def draw_right_aligned_date(draw: ImageDraw.ImageDraw, right_x: int, y: int, lab
 
 
 def draw_task_column(
-    draw: ImageDraw.ImageDraw, x_text: int, x_date_right: int, rows: List[Row], today_d: date
+    draw: ImageDraw.ImageDraw,
+    x_text: int,
+    x_date_right: int,
+    rows: List[Row],
+    today_d: date,
+    wrap: bool = False,
 ) -> None:
-    """Draw single-line rows top-down until the column is full, then a '+N more' line."""
+    """Draw rows top-down until the column is full, then a '+N more' line.
+    Rows are single-line unless wrap=True, which lets long titles take a second line."""
     y = LIST_START_Y
     shown = 0
     for row in rows:
         if not row.due:
             continue
-        if y + ROW_H > LIST_BOTTOM:
-            break
         # Overdue keeps the absolute date in its pill; upcoming gets relative labels
         due_label = fmt_due(row.due) if row.overdue else fmt_due_label(row.due, today_d)
         is_today = (not row.overdue) and row.due == today_d
@@ -405,15 +432,26 @@ def draw_task_column(
         if row.overdue:
             date_w += 14  # pill horizontal padding
         max_title_w = max(10, x_date_right - date_w - TITLE_DATE_GAP - x_text)
-        title = ellipsize_to_width(draw, row.title, title_font, max_title_w)
+        if wrap:
+            # Second line runs under the date, so it gets the full column width
+            title, line2 = split_title_lines(
+                draw, row.title, title_font, max_title_w, max(10, x_date_right - x_text)
+            )
+        else:
+            title, line2 = ellipsize_to_width(draw, row.title, title_font, max_title_w), None
+        height = ROW_H + (WRAP_LINE_H if line2 is not None else 0)
+        if y + height > LIST_BOTTOM:
+            break
 
         draw.text((x_text, y), title, font=title_font, fill=0)
+        if line2 is not None:
+            draw.text((x_text, y + WRAP_LINE_H), line2, font=title_font, fill=0)
         if row.overdue:
             draw_overdue_pill(draw, x_date_right, y + 1, due_label)
         else:
             draw_right_aligned_date(draw, x_date_right, y + 4, due_label)
 
-        y += ROW_H
+        y += height
         shown += 1
 
     if shown < len(rows):
@@ -477,9 +515,9 @@ def draw_month_calendar(draw: ImageDraw.ImageDraw, x: int, y: int, year: int, mo
 # ----------------------------
 # Data sources: Mock + Todoist
 # ----------------------------
-def filter_recurring_window(rows: List[Row]) -> List[Row]:
-    """Recurring column shows only overdue tasks and ones due within the next week."""
-    horizon = date.today() + timedelta(days=RECURRING_WINDOW_DAYS)
+def filter_due_window(rows: List[Row], days: int) -> List[Row]:
+    """Keep only overdue tasks and ones due within the next `days` days."""
+    horizon = date.today() + timedelta(days=days)
     return [r for r in rows if r.due and r.due <= horizon]
 
 
@@ -713,7 +751,7 @@ def render_dashboard(
     draw_header(draw, COL3_X0 + INFO_PAD_LEFT, COL3_X1, today_label)
 
     draw_task_column(draw, COL1_TEXT_X, COL1_DATE_X, recurring, today_d)
-    draw_task_column(draw, COL2_TEXT_X, COL2_DATE_X, todos, today_d)
+    draw_task_column(draw, COL2_TEXT_X, COL2_DATE_X, todos, today_d, wrap=True)
 
     # Info column
     ix = COL3_X0 + INFO_PAD_LEFT
@@ -894,8 +932,9 @@ def main() -> None:
                     print("Pushed error frame to Waveshare display")
                 sys.exit(0)
 
-    # Recurring column only shows overdue + next week (applies to live, cached, and mock)
-    recurring = filter_recurring_window(recurring)
+    # Both columns only show overdue + a forward window (applies to live, cached, and mock)
+    recurring = filter_due_window(recurring, RECURRING_WINDOW_DAYS)
+    todos = filter_due_window(todos, TODOS_WINDOW_DAYS)
 
     # Compute content signature (weather already fetched)
     is_stale = stale_since is not None
