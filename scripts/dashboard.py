@@ -707,13 +707,14 @@ def fetch_weather() -> dict:
         # Build display lines (keep calm + short)
         line1 = f"{round(temp)}°F  {cond}" if temp is not None else f"--°F  {cond}"
         if hi is not None and lo is not None:
-            line2 = f"↑ {round(hi)}°   ↓ {round(lo)}°"
+            line2 = f"↑ {round(hi)}°  ↓ {round(lo)}°"
         else:
             line2 = "↑ --°   ↓ --°"
 
-        lines = [line1, line2]
         if rain is not None:
-            lines.append(f"Rain {round(rain)}%")
+            line2 += f"  {round(rain)}%"  # rain chance shares the hi/lo line
+
+        lines = [line1, line2]
 
         sun = None
         if sunrise and sunset:
