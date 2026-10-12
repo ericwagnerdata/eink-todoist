@@ -524,7 +524,8 @@ def filter_due_window(rows: List[Row], days: int) -> List[Row]:
 
 def get_mock_rows() -> Tuple[List[Row], List[Row]]:
     """Generic demo data (also used for the README screenshot). Short titles,
-    one of every visual state: overdue pill, Today, Tmrw, weekday, absolute date."""
+    one of every visual state: overdue pill, Today, Tmrw, weekday, absolute date,
+    and a to-do long enough to wrap."""
     t = date.today()
 
     def day(offset: int) -> date:
@@ -540,7 +541,7 @@ def get_mock_rows() -> Tuple[List[Row], List[Row]]:
     todos = [
         Row("Pick up dry cleaning", day(0), overdue=False),
         Row("Call the dentist", day(1), overdue=False),
-        Row("Renew car registration", day(3), overdue=False),
+        Row("Renew car registration and update the insurance card", day(3), overdue=False),
         Row("Submit expense report", day(5), overdue=False),
         Row("Book flights for July", day(9), overdue=False),
         Row("Get an oil change", day(13), overdue=False),
