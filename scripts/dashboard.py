@@ -81,7 +81,7 @@ HEADER_LINE_Y_OFFSET = 28
 
 LIST_START_Y = HEADER_Y + HEADER_H + 10
 ROW_H = 32
-WRAP_LINE_H = 24  # extra height when a to-do title wraps to a second line
+WRAP_LINE_H = 24  # extra height when a title wraps to a second line
 LIST_BOTTOM = H - PAD_Y - 18  # keep room for a "+N more" line
 
 RECURRING_WINDOW_DAYS = 7  # recurring column shows overdue + next week only
@@ -413,10 +413,9 @@ def draw_task_column(
     x_date_right: int,
     rows: List[Row],
     today_d: date,
-    wrap: bool = False,
 ) -> None:
     """Draw rows top-down until the column is full, then a '+N more' line.
-    Rows are single-line unless wrap=True, which lets long titles take a second line."""
+    Long titles wrap to a second line."""
     y = LIST_START_Y
     shown = 0
     for row in rows:
@@ -432,13 +431,10 @@ def draw_task_column(
         if row.overdue:
             date_w += 14  # pill horizontal padding
         max_title_w = max(10, x_date_right - date_w - TITLE_DATE_GAP - x_text)
-        if wrap:
-            # Second line runs under the date, so it gets the full column width
-            title, line2 = split_title_lines(
-                draw, row.title, title_font, max_title_w, max(10, x_date_right - x_text)
-            )
-        else:
-            title, line2 = ellipsize_to_width(draw, row.title, title_font, max_title_w), None
+        # Second line runs under the date, so it gets the full column width
+        title, line2 = split_title_lines(
+            draw, row.title, title_font, max_title_w, max(10, x_date_right - x_text)
+        )
         height = ROW_H + (WRAP_LINE_H if line2 is not None else 0)
         if y + height > LIST_BOTTOM:
             break
@@ -753,7 +749,7 @@ def render_dashboard(
     draw_header(draw, COL3_X0 + INFO_PAD_LEFT, COL3_X1, today_label)
 
     draw_task_column(draw, COL1_TEXT_X, COL1_DATE_X, recurring, today_d)
-    draw_task_column(draw, COL2_TEXT_X, COL2_DATE_X, todos, today_d, wrap=True)
+    draw_task_column(draw, COL2_TEXT_X, COL2_DATE_X, todos, today_d)
 
     # Info column
     ix = COL3_X0 + INFO_PAD_LEFT
